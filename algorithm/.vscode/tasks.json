@@ -1,0 +1,46 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "taskName": "Compile", // 任务名称，与launch.json的preLaunchTask相对应
+            "command": "clang", // 如果用MinGW，编译C用gcc，编译c++用g++
+            "args": [
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}.exe",
+                "-g",
+                "-Og",
+                "-Wall",
+                "-static-libgcc",
+                "-fcolor-diagnostics",
+                "--target=x86_64-w64-mingw"
+            ], // 编译命令参数
+            "type": "shell",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "silent", // 设置是否在“终端”中显示编译信息，可以为always，silent，never。一些错误提示也在这里，但是因为有静态检测，我就设为silent了。
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": {
+                "owner": "cpp",
+                "fileLocation": [
+                    "relative",
+                    "/"
+                ],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$", // 正则表达式，用于描述在“问题”栏中显示的信息。
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
+            } // 1.11.0的更新日志里说可以直接写"problemMatcher": "$gcc"，但是我试了一下不行。
+        }
+    ]
+}
