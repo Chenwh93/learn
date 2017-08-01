@@ -342,9 +342,9 @@ class NetworkMonitor(app_manager.RyuApp):
 
         if reason in reason_dict:
 
-            print "switch%d: port %s %s" % (dpid, reason_dict[reason], port_no)
+            print ("switch%d: port %s %s" % (dpid, reason_dict[reason], port_no))
         else:
-            print "switch%d: Illeagal port state %s %s" % (port_no, reason)
+            print ("switch%d: Illeagal port state %s %s" % (port_no, reason))
 
     def show_stat(self, type):
         '''
@@ -374,7 +374,7 @@ class NetworkMonitor(app_manager.RyuApp):
                             (stat.match.get('in_port'),
                             stat.match.get('ipv4_dst'),
                             stat.instructions[0].actions[0].port)][-1])))
-            print '\n'
+            print ('\n')
 
         if(type == 'port'):
             print('datapath             port   ''rx-pkts  rx-bytes rx-error '
@@ -397,4 +397,4 @@ class NetworkMonitor(app_manager.RyuApp):
                             self.port_features[dpid][stat.port_no][2],
                             self.port_features[dpid][stat.port_no][0],
                             self.port_features[dpid][stat.port_no][1]))
-            print '\n'
+            print ('\n')
