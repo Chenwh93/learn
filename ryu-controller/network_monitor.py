@@ -12,6 +12,9 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
 from ryu.lib.packet import packet
 import setting
+import networkx as nx
+import numpy as np
+import os
 
 
 CONF = cfg.CONF
@@ -34,10 +37,13 @@ class NetworkMonitor(app_manager.RyuApp):
         self.stats = {}
         self.port_features = {}
         self.free_bandwidth = {}
+        self.current_traffic = {}
+        self.traffic_metric = {}
         self.awareness = lookup_service_brick('awareness')
         self.graph = None
         self.capabilities = None
         self.best_paths = None
+        self.init_capabilities_metric = None
         # Start to green thread to monitor traffic and calculating
         # free bandwidth of links respectively.
         self.monitor_thread = hub.spawn(self._monitor)
@@ -74,8 +80,8 @@ class NetworkMonitor(app_manager.RyuApp):
                 self.best_paths = None
             hub.sleep(setting.MONITOR_PERIOD)
             if self.stats['flow'] or self.stats['port']:
-                self.show_stat('flow')
-                self.show_stat('port')
+                #self.show_stat('flow')
+                #self.show_stat('port')
                 hub.sleep(1)
 
     def _save_bw_graph(self):
@@ -83,9 +89,17 @@ class NetworkMonitor(app_manager.RyuApp):
             Save bandwidth data into networkx graph object.
         """
         while CONF.weight == 'bw':
-            self.graph = self.create_bw_graph(self.free_bandwidth)
+            self.graph = self.create_bw_graph(self.free_bandwidth)                
             self.logger.debug("save_freebandwidth")
             hub.sleep(setting.MONITOR_PERIOD)
+
+    
+    def create_capabilities_metric(self, graph):
+        """
+            Convert bandwidth graph into metric.
+        """
+        capabilities_metric = nx.to_numpy_matrix(graph, weight='bandwidth')
+        return capabilities_metric
 
     def _request_stats(self, datapath):
         """
@@ -112,7 +126,7 @@ class NetworkMonitor(app_manager.RyuApp):
         _len = len(path)
         if _len > 1:
             minimal_band_width = min_bw
-            for i in xrange(_len-1):
+            for i in range(_len-1):
                 pre, curr = path[i], path[i+1]
                 if 'bandwidth' in graph[pre][curr]:
                     bw = graph[pre][curr]['bandwidth']
@@ -122,13 +136,67 @@ class NetworkMonitor(app_manager.RyuApp):
             return minimal_band_width
         return min_bw
 
+    def check_create_flag(self, graph, paths, src, dst):
+        create_flag = False
+        for path in paths[src][dst]:
+            _len = len(path)
+            if _len > 1:
+                for i in range(_len-1):
+                    if 'bandwidth' in graph[path[i]][path[i+1]]:
+                        if graph[path[i]][path[i+1]]['bandwidth'] > 1000:
+                            create_flag = True
+        return create_flag      
+
+    def check_traffic_flag(self, dp, port, traffic_metric):
+        traffic_flag = False
+        if traffic_metric[dp][port] >= 1:
+            traffic_flag = True
+        return traffic_flag       
+        
+    def get_best_path_by_te(self, dp, port, graph, src, dst, paths):
+        port_path_dic = {}
+        create_flag = self.check_create_flag(graph, paths, src, dst)
+        traffic_flag = self.check_traffic_flag(dp.id, port, self.current_traffic)
+        if create_flag and traffic_flag:
+            
+            new_graph = self.change_graph_weight_by_bw(graph)
+            best_path = nx.dijkstra_path(new_graph,src,dst)
+            traffic_mx = copy.deepcopy(self.traffic_metric)
+            print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+            print(self.current_traffic)
+            print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+            os._exit(0)
+            
+            
+
+
+    def change_graph_weight_by_bw(self, graph): 
+        cp_metric = self.create_capabilities_metric(graph)
+        cp_metric_t = np.zeros([len(cp_metric), len(cp_metric)])
+        tmp_graph = nx.DiGraph()
+        for i in range(cp_metric.shape[0]):
+            for j in range(cp_metric.shape[1]):
+                if i == j:
+                    cp_metric[i,j] = 0
+        for i in range(cp_metric.shape[0]):
+            for j in range(cp_metric.shape[1]):
+                if cp_metric[i,j] == 0:
+                    cp_metric_t[i,j] = cp_metric[i,j] + setting.ESP
+                else:
+                    cp_metric_t[i, j] = cp_metric[i, j]
+        weight_metric = 1 / cp_metric_t
+        for i in range(len(weight_metric)):
+            for j in range(len(weight_metric[0])):
+                tmp_graph.add_edge(i+1,j+1,weight=weight_metric[i,j])
+        
+        return tmp_graph
+
     def get_best_path_by_bw(self, graph, paths):
         """
             Get best path by comparing paths.
         """
         capabilities = {}
         best_paths = copy.deepcopy(paths)
-
         for src in paths:
             for dst in paths[src]:
                 if src == dst:
@@ -150,6 +218,7 @@ class NetworkMonitor(app_manager.RyuApp):
                 capabilities[src][dst] = max_bw_of_paths
         self.capabilities = capabilities
         self.best_paths = best_paths
+        
         return capabilities, best_paths
 
     def create_bw_graph(self, bw_dict):
@@ -185,6 +254,15 @@ class NetworkMonitor(app_manager.RyuApp):
             curr_bw = self._get_free_bw(capacity, speed)
             self.free_bandwidth[dpid].setdefault(port_no, None)
             self.free_bandwidth[dpid][port_no] = curr_bw
+        else:
+            self.logger.info("Fail in getting port state")
+    
+    def _get_current_traffic(self,dpid, port_no, speed):
+        port_state = self.port_features.get(dpid).get(port_no)
+        if port_state:
+            curr_tr = speed * 8/10**6
+            self.current_traffic[dpid].setdefault(port_no, None)
+            self.current_traffic[dpid][port_no] = curr_tr
         else:
             self.logger.info("Fail in getting port state")
 
@@ -256,6 +334,7 @@ class NetworkMonitor(app_manager.RyuApp):
         dpid = ev.msg.datapath.id
         self.stats['port'][dpid] = body
         self.free_bandwidth.setdefault(dpid, {})
+        self.current_traffic.setdefault(dpid, {})
 
         for stat in sorted(body, key=attrgetter('port_no')):
             port_no = stat.port_no
@@ -281,6 +360,7 @@ class NetworkMonitor(app_manager.RyuApp):
 
                 self._save_stats(self.port_speed, key, speed, 5)
                 self._save_freebandwidth(dpid, port_no, speed)
+                self._get_current_traffic(dpid, port_no, speed)
 
     @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
     def port_desc_stats_reply_handler(self, ev):
@@ -355,6 +435,21 @@ class NetworkMonitor(app_manager.RyuApp):
             return
 
         bodys = self.stats[type]
+        """
+        print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+        for n,nbrs in self.awareness.graph.adjacency_iter():
+            for nbr,eattr in nbrs.items():
+                if 'weight' in eattr and 'bandwidth' in eattr:
+                
+                    print('(%d, %d, %d, %d)' % (n,nbr,eattr['weight'],eattr['bandwidth']))
+        print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+        #A = nx.to_numpy_matrix(self.awareness.graph, weight='bandwidth')
+        #print(A)
+        #print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+        print(self.init_capabilities_metric)
+        print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+        """
+        
         if(type == 'flow'):
             print('datapath         ''   in-port        ip-dst      '
                   'out-port packets  bytes  flow-speed(B/s)')

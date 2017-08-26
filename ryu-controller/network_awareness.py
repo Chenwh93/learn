@@ -48,6 +48,7 @@ class NetworkAwareness(app_manager.RyuApp):
         self.pre_access_table = {}
         self.pre_link_to_port = {}
         self.shortest_paths = None
+        self.possible_paths = None
 
         # Start a green thread to discover network resource.
         self.discover_thread = hub.spawn(self._discover)
@@ -55,7 +56,7 @@ class NetworkAwareness(app_manager.RyuApp):
     def _discover(self):
         i = 0
         while True:
-            self.show_topology()
+            #self.show_topology()
             if i == 5:
                 self.get_topology(None)
                 i = 0
@@ -186,7 +187,7 @@ class NetworkAwareness(app_manager.RyuApp):
 
         # Find ksp in graph.
         for src in _graph.nodes():
-            paths.setdefault(src, {src: [[src] for i in xrange(k)]})
+            paths.setdefault(src, {src: [[src] for i in range(k)]})
             for dst in _graph.nodes():
                 if src == dst:
                     continue
@@ -194,6 +195,39 @@ class NetworkAwareness(app_manager.RyuApp):
                 paths[src][dst] = self.k_shortest_paths(_graph, src, dst,
                                                         weight=weight, k=k)
         return paths
+
+    def find_possible_paths(self, graph, src, dst):
+        """
+            Great possible paths of src to dst.
+        """
+        generator = nx.all_simple_paths(graph,src,dst)
+        possiblepaths = []
+
+        try:
+            for path in generator:
+                possiblepaths.append(path)
+            return possiblepaths
+        except:
+            self.logger.debug("No path between %s and %s" % (src, dst))
+    
+        
+    def all_possible_paths(self, graph):
+        """
+            Creat all possible paths between datapaths.
+        """
+        _graph = copy.deepcopy(graph)
+        paths = {}
+
+        for src in _graph.nodes():
+            paths.setdefault(src, {})
+            for dst in _graph.nodes():
+                if src == dst:
+                    continue
+                paths[src].setdefault(dst, [])
+                paths[src][dst] = self.find_possible_paths(_graph, src, dst)
+        return paths
+
+
 
     # List the event list should be listened.
     events = [event.EventSwitchEnter,
@@ -215,6 +249,7 @@ class NetworkAwareness(app_manager.RyuApp):
         self.get_graph(self.link_to_port.keys())
         self.shortest_paths = self.all_k_shortest_paths(
             self.graph, weight='weight', k=CONF.k_paths)
+        self.possible_paths = self.all_possible_paths(self.graph)
 
     def register_access_info(self, dpid, in_port, ip, mac):
         """
@@ -259,40 +294,40 @@ class NetworkAwareness(app_manager.RyuApp):
     def show_topology(self):
         switch_num = len(list(self.graph.nodes()))
         if self.pre_graph != self.graph and setting.TOSHOW:
-            print "---------------------Topo Link---------------------"
-            print '%10s' % ("switch"),
+            print ("---------------------Topo Link---------------------")
+            print ('%10s' % ("switch")),
             for i in self.graph.nodes():
-                print '%10d' % i,
-            print ""
+                print ('%10d' % i),
+            print ("")
             for i in self.graph.nodes():
-                print '%10d' % i,
+                print ('%10d' % i),
                 for j in self.graph[i].values():
-                    print '%10.0f' % j['weight'],
-                print ""
+                    print ('%10.0f' % j['weight']),
+                print ("")
             self.pre_graph = copy.deepcopy(self.graph)
 
         if self.pre_link_to_port != self.link_to_port and setting.TOSHOW:
-            print "---------------------Link Port---------------------"
-            print '%10s' % ("switch"),
+            print ("---------------------Link Port---------------------")
+            print ('%10s' % ("switch")),
             for i in self.graph.nodes():
-                print '%10d' % i,
-            print ""
+                print ('%10d' % i),
+            print ("")
             for i in self.graph.nodes():
-                print '%10d' % i,
+                print ('%10d' % i),
                 for j in self.graph.nodes():
                     if (i, j) in self.link_to_port.keys():
-                        print '%10s' % str(self.link_to_port[(i, j)]),
+                        print ('%10s' % str(self.link_to_port[(i, j)])),
                     else:
-                        print '%10s' % "No-link",
-                print ""
+                        print ('%10s' % "No-link"),
+                print ("")
             self.pre_link_to_port = copy.deepcopy(self.link_to_port)
 
         if self.pre_access_table != self.access_table and setting.TOSHOW:
-            print "----------------Access Host-------------------"
-            print '%10s' % ("switch"), '%12s' % "Host"
+            print ("----------------Access Host-------------------")
+            print ('%10s' % ("switch"), '%12s' % "Host")
             if not self.access_table.keys():
-                print "    NO found host"
+                print ("    NO found host")
             else:
                 for tup in self.access_table:
-                    print '%10d:    ' % tup[0], self.access_table[tup]
+                    print ('%10d:    ' % tup[0], self.access_table[tup])
             self.pre_access_table = copy.deepcopy(self.access_table)
