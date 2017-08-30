@@ -13,6 +13,8 @@ METRIC_FLAG = 0
 
 ESP = 0.0000000000000000000001
 
+TRAFFIC_FLAG = 4
+
 LINK_TYPE = np.array(
     [
         [0,4,4,4,0,0,0],

@@ -38,11 +38,11 @@ class NetworkMonitor(app_manager.RyuApp):
         self.port_features = {}
         self.free_bandwidth = {}
         self.current_traffic = {}
-        self.traffic_metric = {}
         self.awareness = lookup_service_brick('awareness')
         self.graph = None
         self.capabilities = None
         self.best_paths = None
+        self.port_path_dic = None
         self.init_capabilities_metric = None
         # Start to green thread to monitor traffic and calculating
         # free bandwidth of links respectively.
@@ -78,6 +78,7 @@ class NetworkMonitor(app_manager.RyuApp):
                 # refresh data.
                 self.capabilities = None
                 self.best_paths = None
+                #self.port_path_dic = None
             hub.sleep(setting.MONITOR_PERIOD)
             if self.stats['flow'] or self.stats['port']:
                 #self.show_stat('flow')
@@ -99,7 +100,18 @@ class NetworkMonitor(app_manager.RyuApp):
             Convert bandwidth graph into metric.
         """
         capabilities_metric = nx.to_numpy_matrix(graph, weight='bandwidth')
-        return capabilities_metric
+        capabilities_metric_t = np.zeros([len(capabilities_metric), len(capabilities_metric)])
+        for i in range(capabilities_metric.shape[0]):
+            for j in range(capabilities_metric.shape[1]):
+                if i == j:
+                    capabilities_metric[i,j] = 0
+        for i in range(capabilities_metric.shape[0]):
+            for j in range(capabilities_metric.shape[1]):
+                if capabilities_metric[i,j] == 0:
+                    capabilities_metric_t[i,j] = capabilities_metric[i,j] + setting.ESP
+                else:
+                    capabilities_metric_t[i, j] = capabilities_metric[i, j]
+        return capabilities_metric_t
 
     def _request_stats(self, datapath):
         """
@@ -149,42 +161,91 @@ class NetworkMonitor(app_manager.RyuApp):
 
     def check_traffic_flag(self, dp, port, traffic_metric):
         traffic_flag = False
-        if traffic_metric[dp][port] >= 1:
+        if traffic_metric[dp][port] >= setting.TRAFFIC_FLAG:
             traffic_flag = True
-        return traffic_flag       
-        
+        return traffic_flag 
+
+    def get_demand_traffic(self, dp, traffic_metric):
+        demand_traffic = {}
+        for dpid in traffic_metric:
+            if dpid == dp.id:
+                demand_traffic.setdefault(dpid, {})
+                for port_no in traffic_metric[dpid]:
+                    if traffic_metric[dpid][port_no] > 1:
+                        demand_traffic[dpid].setdefault(port_no, None)
+                        demand_traffic[dpid][port_no] = traffic_metric[dpid][port_no]
+        return demand_traffic
+
+    def get_max_utilization(self, path, traffic, cp_metric):
+        max_utilization = 0
+        utilization = np.zeros([1,len(path)-1])
+        for i in range(len(path)-1):
+            utilization[0,i] = traffic / (cp_metric[path[i]-1,path[i+1]-1] / 1000)
+        max_utilization = np.amax(utilization)
+        return max_utilization
+
+    def get_weight_metric(self, cp_metric):
+        weight_metric = 1 / (cp_metric / 1000)
+        return weight_metric
+           
     def get_best_path_by_te(self, dp, port, graph, src, dst, paths):
         port_path_dic = {}
+        d = 0        
         create_flag = self.check_create_flag(graph, paths, src, dst)
         traffic_flag = self.check_traffic_flag(dp.id, port, self.current_traffic)
         if create_flag and traffic_flag:
-            
             new_graph = self.change_graph_weight_by_bw(graph)
-            best_path = nx.dijkstra_path(new_graph,src,dst)
-            traffic_mx = copy.deepcopy(self.traffic_metric)
-            print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
-            print(self.current_traffic)
-            print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
-            os._exit(0)
-            
+            traffic_mx = copy.deepcopy(self.current_traffic)
+            capability_mx = self.create_capabilities_metric(graph)
+            weight_mx = self.get_weight_metric(capability_mx) 
+            demand_traffic = self.get_demand_traffic(dp, traffic_mx)
+            for dpid in demand_traffic:
+                for port_no in demand_traffic[dpid]:
+                    d = d + demand_traffic[dpid][port_no]
+            occupy_metric = np.zeros([len(capability_mx), len(capability_mx)])
+            while d > 0:
+                tmp_dpid = None
+                tmp_port_no = None
+                traffic = 0
+                best_path = nx.dijkstra_path(new_graph,src,dst)
+                access_metric = capability_mx - occupy_metric
+                c = self.get_min_bw_of_links(graph, best_path, setting.MAX_CAPACITY) / 1000
+                p_t = self.get_max_utilization(best_path, d, capability_mx)
+                p = max(1, p_t)
+                f = min(c, d)
+                for dpid in demand_traffic:
+                    for port_no in demand_traffic[dpid]:
+                        if demand_traffic[dpid][port_no] <= f/p:
+                            traffic = demand_traffic[dpid][port_no]
+                            tmp_dpid = dpid
+                            tmp_port_no = port_no
+                            del demand_traffic[dpid][port_no]
+                            break
+                for j in range(len(best_path)-1):
+                    occupy_metric[best_path[j]-1][best_path[j+1]-1] = occupy_metric[best_path[j]-1][best_path[j+1]-1] + traffic
+                d = d - traffic
+                
+                for k in range(len(best_path)-1):
+                    weight_mx[best_path[k]-1][best_path[k+1]-1] = weight_mx[best_path[k]-1][best_path[k+1]-1] * (1 + d / (capability_mx[best_path[k]-1][best_path[k+1]-1]/1000))
+                    new_graph[best_path[k]][best_path[k+1]]['weight'] = weight_mx[best_path[k]-1][best_path[k+1]-1]
+                
+                port_path_dic.setdefault(tmp_dpid, {})
+                port_path_dic[tmp_dpid].setdefault(tmp_port_no, None)
+                port_path_dic[tmp_dpid][tmp_port_no] = best_path
+                        
+            #print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+            #print(port_path_dic)             
+            #print('---!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!---')
+            #os._exit(0)
+        self.port_path_dic = port_path_dic
+        return port_path_dic
             
 
 
     def change_graph_weight_by_bw(self, graph): 
         cp_metric = self.create_capabilities_metric(graph)
-        cp_metric_t = np.zeros([len(cp_metric), len(cp_metric)])
         tmp_graph = nx.DiGraph()
-        for i in range(cp_metric.shape[0]):
-            for j in range(cp_metric.shape[1]):
-                if i == j:
-                    cp_metric[i,j] = 0
-        for i in range(cp_metric.shape[0]):
-            for j in range(cp_metric.shape[1]):
-                if cp_metric[i,j] == 0:
-                    cp_metric_t[i,j] = cp_metric[i,j] + setting.ESP
-                else:
-                    cp_metric_t[i, j] = cp_metric[i, j]
-        weight_metric = 1 / cp_metric_t
+        weight_metric = 1 / (cp_metric / 1000)
         for i in range(len(weight_metric)):
             for j in range(len(weight_metric[0])):
                 tmp_graph.add_edge(i+1,j+1,weight=weight_metric[i,j])

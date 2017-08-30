@@ -229,19 +229,29 @@ class ShortestForwarding(app_manager.RyuApp):
             # and then, we can get path directly.
             try:
                 # if path is existed, return it.
-                path = self.monitor.best_paths.get(src).get(dst)
-                return path
+                #path = self.monitor.best_paths.get(src).get(dst)
+                if self.monitor.check_create_flag(graph,possible_paths,src,dst) and self.monitor.check_traffic_flag(dp.id,port, self.monitor.current_traffic):                                     
+                    path = self.monitor.port_path_dic.get(dp.id).get(port)
+                    #print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                    #print(port)
+                    #print(path)
+                    #print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                    return path
             except:
                 # else, calculate it, and return.
                 
                 #result = self.monitor.get_best_path_by_bw(graph, shortest_paths)
-                                                          
-                
-                result = self.monitor.get_best_path_by_te(dp, port, graph, src, dst, possible_paths)
-                
-                paths = result[1]
-                best_path = paths.get(src).get(dst)
-                return best_path
+                if self.monitor.check_create_flag(graph,possible_paths,src,dst) and self.monitor.check_traffic_flag(dp.id,port, self.monitor.current_traffic):                                     
+                    result = self.monitor.get_best_path_by_te(dp, port, graph, src, dst, possible_paths)
+                    
+                    best_path = result.get(dp.id).get(port)
+                    #print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                    #print(port)
+                    #print(best_path)
+                    #print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                #paths = result[1]
+                #best_path = paths.get(src).get(dst)
+                    return best_path
 
     def get_sw(self, dpid, in_port, src, dst):
         """
@@ -345,15 +355,16 @@ class ShortestForwarding(app_manager.RyuApp):
             if dst_sw:
                 # Path has already calculated, just get it.
                 path = self.get_path(datapath, in_port, src_sw, dst_sw, weight=self.weight)
-                #self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
-                flow_info = (eth_type, ip_src, ip_dst, in_port)
-                # install flow entries to datapath along side the path.
-                """
-                self.install_flow(self.datapaths,
-                                  self.awareness.link_to_port,
-                                  self.awareness.access_table, path,
-                                  flow_info, msg.buffer_id, msg.data)
-                """
+                if path is not None:
+                    self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
+                    flow_info = (eth_type, ip_src, ip_dst, in_port)
+                    # install flow entries to datapath along side the path.
+                    
+                    self.install_flow(self.datapaths,
+                                    self.awareness.link_to_port,
+                                    self.awareness.access_table, path,
+                                    flow_info, msg.buffer_id, msg.data)
+                
         return
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
