@@ -14,6 +14,7 @@ from ryu.lib.packet import packet
 import setting
 import networkx as nx
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 
 
@@ -82,7 +83,7 @@ class NetworkMonitor(app_manager.RyuApp):
             hub.sleep(setting.MONITOR_PERIOD)
             if self.stats['flow'] or self.stats['port']:
                 #self.show_stat('flow')
-                #self.show_stat('port')
+                self.show_stat('port')
                 hub.sleep(1)
 
     def _save_bw_graph(self):
@@ -190,7 +191,7 @@ class NetworkMonitor(app_manager.RyuApp):
            
     def get_best_path_by_te(self, dp, port, graph, src, dst, paths):
         port_path_dic = {}
-        d = 0        
+        d = 0       
         create_flag = self.check_create_flag(graph, paths, src, dst)
         traffic_flag = self.check_traffic_flag(dp.id, port, self.current_traffic)
         if create_flag and traffic_flag:
@@ -209,7 +210,7 @@ class NetworkMonitor(app_manager.RyuApp):
                 traffic = 0
                 best_path = nx.dijkstra_path(new_graph,src,dst)
                 access_metric = capability_mx - occupy_metric
-                c = self.get_min_bw_of_links(graph, best_path, setting.MAX_CAPACITY) / 1000
+                c = self.get_min_bw_of_links(new_graph, best_path, setting.MAX_CAPACITY) / 1000
                 p_t = self.get_max_utilization(best_path, d, capability_mx)
                 p = max(1, p_t)
                 f = min(c, d)

@@ -15,6 +15,10 @@ ESP = 0.0000000000000000000001
 
 TRAFFIC_FLAG = 4
 
+NAT64_FlAG = 1
+V6OV4_FLAG = 2
+V4OV6_FLAG = 3
+
 LINK_TYPE = np.array(
     [
         [0,4,4,4,0,0,0],

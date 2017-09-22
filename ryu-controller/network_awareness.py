@@ -2,6 +2,7 @@ import logging
 import struct
 import copy
 import networkx as nx
+from ipaddress import ip_address
 from operator import attrgetter
 from ryu import cfg
 from ryu.base import app_manager
@@ -13,6 +14,8 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
+from ryu.lib.packet import ipv6
+from ryu.lib.packet import icmpv6
 from ryu.lib.packet import arp
 from ryu.lib import hub
 
@@ -39,6 +42,7 @@ class NetworkAwareness(app_manager.RyuApp):
         self.name = "awareness"
         self.link_to_port = {}       # (src_dpid,dst_dpid)->(src_port,dst_port)
         self.access_table = {}       # {(sw,port) :[host1_ip]}
+        self.ipv6_access_table = {}
         self.switch_port_table = {}  # dpip->port_num
         self.access_ports = {}       # dpid->port_num
         self.interior_ports = {}     # dpid->port_num
@@ -99,6 +103,16 @@ class NetworkAwareness(app_manager.RyuApp):
         """
         for key in self.access_table.keys():
             if self.access_table[key][0] == host_ip:
+                return key
+        self.logger.info("%s location is not found." % host_ip)
+        return None
+    
+    def get_ipv6_host_location(self, host_ip):
+        """
+            Get host location info:(datapath, port) according to host ip.
+        """
+        for key in self.ipv6_access_table.keys():
+            if self.ipv6_access_table[key][0] == host_ip:
                 return key
         self.logger.info("%s location is not found." % host_ip)
         return None
@@ -255,18 +269,31 @@ class NetworkAwareness(app_manager.RyuApp):
         """
             Register access host info into access table.
         """
-        if in_port in self.access_ports[dpid]:
-            if (dpid, in_port) in self.access_table:
-                if self.access_table[(dpid, in_port)] == (ip, mac):
-                    return
+        if ip_address(ip).version == 4:
+            if in_port in self.access_ports[dpid]:
+                if (dpid, in_port) in self.access_table:
+                    if self.access_table[(dpid, in_port)] == (ip, mac):
+                        return
+                    else:
+                        self.access_table[(dpid, in_port)] = (ip, mac)
+                        return
                 else:
+                    self.access_table.setdefault((dpid, in_port), None)
                     self.access_table[(dpid, in_port)] = (ip, mac)
                     return
-            else:
-                self.access_table.setdefault((dpid, in_port), None)
-                self.access_table[(dpid, in_port)] = (ip, mac)
-                return
-
+        if ip_address(ip).version == 6:
+            if in_port in self.access_ports[dpid]:
+                if not ip_address(ip).is_link_local and ip_address(ip) != ip_address("::"):
+                    if (dpid, in_port) in self.ipv6_access_table:
+                        if self.ipv6_access_table[(dpid, in_port)] == (ip, mac):
+                            return
+                        else:
+                            self.ipv6_access_table[(dpid, in_port)] = (ip, mac)
+                            return
+                    else:
+                        self.ipv6_access_table.setdefault((dpid, in_port), None)
+                        self.ipv6_access_table[(dpid, in_port)] = (ip, mac)
+                        return
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         """
@@ -281,7 +308,9 @@ class NetworkAwareness(app_manager.RyuApp):
 
         eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
         arp_pkt = pkt.get_protocol(arp.arp)
-        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        icmpv6_pkt = pkt.get_protocol(icmpv6.icmpv6)
+        ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
+        ipv6_pkt = pkt.get_protocol(ipv6.ipv6)
 
         if arp_pkt:
             arp_src_ip = arp_pkt.src_ip
@@ -290,6 +319,10 @@ class NetworkAwareness(app_manager.RyuApp):
 
             # Record the access info
             self.register_access_info(datapath.id, in_port, arp_src_ip, mac)
+        if pkt.get_protocol(ipv6.ipv6):
+            ipv6_src_ip = pkt[1].src
+            ipv6_mac = pkt[0].src
+            self.register_access_info(datapath.id, in_port, ipv6_src_ip, ipv6_mac)
 
     def show_topology(self):
         switch_num = len(list(self.graph.nodes()))
