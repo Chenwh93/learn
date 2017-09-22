@@ -29,5 +29,8 @@
         "cpp": "cd $dir && clang++ $fileName -o $fileNameWithoutExt.exe -Wall -g -Og -static-libgcc -fcolor-diagnostics --target=x86_64-w64-mingw && $dir$fileNameWithoutExt"
     },
     "code-runner.saveFileBeforeRun": true,
-    "C_Cpp.clang_format_sortIncludes": true
+    "C_Cpp.clang_format_sortIncludes": true,
+    "files.associations": {
+        "iostream": "cpp"
+    }
 }
