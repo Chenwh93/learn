@@ -75,6 +75,7 @@ class NetworkMonitor(app_manager.RyuApp):
             self.stats['port'] = {}
             for dp in self.datapaths.values():
                 self.port_features.setdefault(dp.id, {})
+                #self.port_mac_dic.setdefault(dp.id, {})
                 self._request_stats(dp)
                 # refresh data.
                 self.capabilities = None
@@ -466,6 +467,9 @@ class NetworkMonitor(app_manager.RyuApp):
 
             port_feature = (config, state, p.curr_speed)
             self.port_features[dpid][p.port_no] = port_feature
+            #self.port_mac_dic[dpid][p.port_no] = p.hw_addr
+
+         
 
     @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
     def _port_status_handler(self, ev):
@@ -474,6 +478,7 @@ class NetworkMonitor(app_manager.RyuApp):
         """
         msg = ev.msg
         reason = msg.reason
+        port = msg.desc
         port_no = msg.desc.port_no
         dpid = msg.datapath.id
         ofproto = msg.datapath.ofproto
@@ -482,11 +487,13 @@ class NetworkMonitor(app_manager.RyuApp):
                        ofproto.OFPPR_DELETE: "deleted",
                        ofproto.OFPPR_MODIFY: "modified", }
 
+
         if reason in reason_dict:
 
             print ("switch%d: port %s %s" % (dpid, reason_dict[reason], port_no))
         else:
             print ("switch%d: Illeagal port state %s %s" % (port_no, reason))
+
 
     def show_stat(self, type):
         '''

@@ -55,6 +55,7 @@ class ShortestForwarding(app_manager.RyuApp):
         self.delay_detector = kwargs["network_delay_detector"]
         self.datapaths = {}
         self.weight = self.WEIGHT_MODEL[CONF.weight]
+        self.port_mac_dic = {}
 
     def set_weight_mode(self, weight):
         """
@@ -98,6 +99,25 @@ class ShortestForwarding(app_manager.RyuApp):
         dp.send_msg(mod)
 
     def send_flow_mod(self, datapath, flow_info, src_port, dst_port):
+        """
+            Build flow entry, and send it to datapath.
+        """
+        parser = datapath.ofproto_parser
+        actions = []
+        actions.append(parser.OFPActionOutput(dst_port))
+
+        if flow_info[0] == 0x0800:
+            match = parser.OFPMatch(
+                in_port=src_port, eth_type=flow_info[0],
+                ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
+        if flow_info[0] == 0x86DD:
+            match = parser.OFPMatch(
+                in_port=src_port, eth_type=flow_info[0],
+                ipv6_src=flow_info[1], ipv6_dst=flow_info[2])
+
+        self.add_flow(datapath, 1, match, actions,
+                      idle_timeout=15, hard_timeout=60)
+    def send_transit_flow_mod(self, datapath, flow_info, transit_info, src_port, dst_port):
         """
             Build flow entry, and send it to datapath.
         """
@@ -242,8 +262,8 @@ class ShortestForwarding(app_manager.RyuApp):
             datapath_dst, out_port = result[0], result[1]
             datapath = self.datapaths[datapath_dst]
             out = self._build_packet_out(datapath, ofproto.OFP_NO_BUFFER,
-                                         ofproto.OFPP_CONTROLLER,
-                                         out_port, msg.data)
+                                        ofproto.OFPP_CONTROLLER,
+                                        out_port, msg.data)
             datapath.send_msg(out)
             self.logger.debug("Reply ICMPv6NS to knew host")
         else:
@@ -305,16 +325,16 @@ class ShortestForwarding(app_manager.RyuApp):
         dst_location = None
         if ip_address(src).version == 4:
             src_location = self.awareness.get_host_location(src)
-        if ip_address(src).version == 6:
+        if ip_address(src).version == 6 and not ip_address(src).is_link_local:
             src_location = self.awareness.get_ipv6_host_location(src)
         if in_port in self.awareness.access_ports[dpid]:
-            if (dpid,  in_port) == src_location:
+            if (dpid, in_port) == src_location:
                 src_sw = src_location[0]
             else:
                 return None
         if ip_address(src).version == 4:
             dst_location = self.awareness.get_host_location(dst)
-        if ip_address(src).version == 6:
+        if ip_address(src).version == 6 and not ip_address(src).is_link_local:
             dst_location = self.awareness.get_ipv6_host_location(dst)
         if dst_location:
             dst_sw = dst_location[0]
@@ -336,6 +356,8 @@ class ShortestForwarding(app_manager.RyuApp):
         out_port = first_dp.ofproto.OFPP_LOCAL
         back_info = (flow_info[0], flow_info[2], flow_info[1])
 
+        
+
         # inter_link
         if len(path) > 2:
             for i in range(1, len(path)-1):
@@ -345,6 +367,8 @@ class ShortestForwarding(app_manager.RyuApp):
                                                          path[i], path[i+1])
                 if port and port_next:
                     src_port, dst_port = port[1], port_next[0]
+                    # if path[i] in transit_info:
+                    #     pass
                     datapath = datapaths[path[i]]
                     self.send_flow_mod(datapath, flow_info, src_port, dst_port)
                     self.send_flow_mod(datapath, back_info, dst_port, src_port)
@@ -494,6 +518,19 @@ class ShortestForwarding(app_manager.RyuApp):
                 
         return
 
+    @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
+    def port_desc_stats_reply_handler(self, ev):
+        """
+            Save port description info.
+        """
+        msg = ev.msg
+        dpid = msg.datapath.id
+
+        for p in ev.msg.body:
+            self.port_mac_dic.setdefault(dpid, {})
+            self.port_mac_dic[dpid][p.port_no] = p.hw_addr
+        
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         '''
@@ -524,7 +561,7 @@ class ShortestForwarding(app_manager.RyuApp):
         if isinstance(ipv6_pkt, ipv6.ipv6):
             self.logger.debug("IPV6 processing")
             if len(pkt.get_protocols(ethernet.ethernet)):
-                if isinstance(pkt.get_protocol(icmpv6.icmpv6), icmpv6.icmpv6):
+                if len(pkt) == 3 and 133 <= pkt[2].type_ <= 137:
                     self.logger.debug("ICMPv6ND processing")
                     self.icmpv6nd_forwarding(msg, pkt[1].src, pkt[1].dst)
                 else:

@@ -53,6 +53,7 @@ class NetworkAwareness(app_manager.RyuApp):
         self.pre_link_to_port = {}
         self.shortest_paths = None
         self.possible_paths = None
+        self.port_mac_dic = {}
 
         # Start a green thread to discover network resource.
         self.discover_thread = hub.spawn(self._discover)
@@ -104,7 +105,7 @@ class NetworkAwareness(app_manager.RyuApp):
         for key in self.access_table.keys():
             if self.access_table[key][0] == host_ip:
                 return key
-        self.logger.info("%s location is not found." % host_ip)
+        self.logger.info("%s ipv4 location is not found." % host_ip)
         return None
     
     def get_ipv6_host_location(self, host_ip):
@@ -114,7 +115,7 @@ class NetworkAwareness(app_manager.RyuApp):
         for key in self.ipv6_access_table.keys():
             if self.ipv6_access_table[key][0] == host_ip:
                 return key
-        self.logger.info("%s location is not found." % host_ip)
+        self.logger.info("%s ipv6 location is not found." % host_ip)
         return None
 
     def get_switches(self):
@@ -264,6 +265,7 @@ class NetworkAwareness(app_manager.RyuApp):
         self.shortest_paths = self.all_k_shortest_paths(
             self.graph, weight='weight', k=CONF.k_paths)
         self.possible_paths = self.all_possible_paths(self.graph)
+    
 
     def register_access_info(self, dpid, in_port, ip, mac):
         """
