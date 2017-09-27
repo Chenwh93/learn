@@ -8,6 +8,7 @@ from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import CONFIG_DISPATCHER
+from ryu.controller.handler import HANDSHAKE_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
@@ -97,6 +98,7 @@ class ShortestForwarding(app_manager.RyuApp):
                                 hard_timeout=hard_timeout,
                                 match=match, instructions=inst)
         dp.send_msg(mod)
+        print("====================")
 
     def send_flow_mod(self, datapath, flow_info, src_port, dst_port):
         """
@@ -116,7 +118,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 ipv6_src=flow_info[1], ipv6_dst=flow_info[2])
 
         self.add_flow(datapath, 1, match, actions,
-                      idle_timeout=15, hard_timeout=60)
+                      idle_timeout=60, hard_timeout=120)
     def send_transit_flow_mod(self, datapath, flow_info, transit_info, src_port, dst_port):
         """
             Build flow entry, and send it to datapath.
@@ -135,7 +137,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 ipv6_src=flow_info[1], ipv6_dst=flow_info[2])
 
         self.add_flow(datapath, 1, match, actions,
-                      idle_timeout=15, hard_timeout=60)
+                      idle_timeout=60, hard_timeout=120)
 
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         """
@@ -216,6 +218,7 @@ class ShortestForwarding(app_manager.RyuApp):
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        pkt = packet.Packet(msg.data)
 
         for dpid in self.awareness.access_ports:
             for port in self.awareness.access_ports[dpid]:
@@ -225,6 +228,14 @@ class ShortestForwarding(app_manager.RyuApp):
                         datapath, ofproto.OFP_NO_BUFFER,
                         ofproto.OFPP_CONTROLLER, port, msg.data)
                     datapath.send_msg(out)
+                else:
+                    if ip_address(pkt[1].dst).is_multicast:
+                        datapath = self.datapaths[dpid]
+                        out = self._build_packet_out(
+                            datapath, ofproto.OFP_NO_BUFFER,
+                            ofproto.OFPP_CONTROLLER, port, msg.data)
+                        datapath.send_msg(out)
+
         self.logger.debug("Flooding msg")
 
     def arp_forwarding(self, msg, src_ip, dst_ip):
@@ -511,6 +522,8 @@ class ShortestForwarding(app_manager.RyuApp):
                                         self.awareness.access_table, path,
                                         flow_info, transit_info, msg.buffer_id, msg.data)
                     if ip_address(ip_src).version == 6: 
+                        print("!!!!!!!!!!!!!!!!!!!")
+                        print(self.awareness.ipv6_access_table)
                         self.install_flow(self.datapaths,
                                         self.awareness.link_to_port,
                                         self.awareness.ipv6_access_table, path,
@@ -529,6 +542,11 @@ class ShortestForwarding(app_manager.RyuApp):
         for p in ev.msg.body:
             self.port_mac_dic.setdefault(dpid, {})
             self.port_mac_dic[dpid][p.port_no] = p.hw_addr
+    
+    @set_ev_cls(ofp_event.EventOFPErrorMsg, [HANDSHAKE_DISPATCHER, CONFIG_DISPATCHER, MAIN_DISPATCHER])
+    def error_msg_handler(self, ev):
+        msg = ev.msg
+        self.logger.error('ERROR from %016x type=%d,code=%d', msg.datapath.id, msg.type, msg.code)
         
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -564,6 +582,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 if len(pkt) == 3 and 133 <= pkt[2].type_ <= 137:
                     self.logger.debug("ICMPv6ND processing")
                     self.icmpv6nd_forwarding(msg, pkt[1].src, pkt[1].dst)
+                    
                 else:
                     eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
                     self.shortest_forwarding(msg, eth_type, ipv6_pkt.src, ipv6_pkt.dst)

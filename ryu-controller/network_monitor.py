@@ -562,3 +562,4 @@ class NetworkMonitor(app_manager.RyuApp):
                             self.port_features[dpid][stat.port_no][0],
                             self.port_features[dpid][stat.port_no][1]))
             print ('\n')
+            
