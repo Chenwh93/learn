@@ -17,6 +17,7 @@ from ryu.lib.packet import ipv4
 from ryu.lib.packet import ipv6
 from ryu.lib.packet import icmpv6
 from ryu.lib.packet import arp
+from ryu.lib import hub
 
 from ryu.topology import event, switches
 from ryu.topology.api import get_switch, get_link
@@ -25,6 +26,8 @@ import network_awareness
 import network_monitor
 import network_delay_detector
 import setting
+import copy
+import random
 
 
 
@@ -57,6 +60,27 @@ class ShortestForwarding(app_manager.RyuApp):
         self.datapaths = {}
         self.weight = self.WEIGHT_MODEL[CONF.weight]
         self.port_mac_dic = {}
+        self.send_ra_thread = hub.spawn_after(10, self.send_ra)
+
+    def send_ra(self):
+        while True:
+            for dpid in self.port_mac_dic:
+                for port in self.port_mac_dic[dpid]:
+                    if 1 <= port <= 5:
+                        datapath = self.datapaths[dpid]
+                        parser = datapath.ofproto_parser
+                        ofproto = datapath.ofproto 
+                        ra_out = self.generate_ra_pkt(datapath, port)
+                        ra_out.serialize()
+                        data = ra_out.data
+                        actions = [parser.OFPActionOutput(port=port)]
+                        out = parser.OFPPacketOut(datapath=datapath,
+                                                    buffer_id=ofproto.OFP_NO_BUFFER,
+                                                    in_port=ofproto.OFPP_CONTROLLER,
+                                                    actions=actions,
+                                                    data=data)
+                        datapath.send_msg(out)
+            hub.sleep(300)
 
     def set_weight_mode(self, weight):
         """
@@ -98,7 +122,8 @@ class ShortestForwarding(app_manager.RyuApp):
                                 hard_timeout=hard_timeout,
                                 match=match, instructions=inst)
         dp.send_msg(mod)
-        print("====================")
+        
+        
 
     def send_flow_mod(self, datapath, flow_info, src_port, dst_port):
         """
@@ -118,26 +143,147 @@ class ShortestForwarding(app_manager.RyuApp):
                 ipv6_src=flow_info[1], ipv6_dst=flow_info[2])
 
         self.add_flow(datapath, 1, match, actions,
-                      idle_timeout=60, hard_timeout=120)
-    def send_transit_flow_mod(self, datapath, flow_info, transit_info, src_port, dst_port):
+                      idle_timeout=600, hard_timeout=1200)
+
+
+    def send_transit_flow_mod(self, datapath, path, flow_info, transit_info, src_port, dst_port):
         """
             Build flow entry, and send it to datapath.
         """
         parser = datapath.ofproto_parser
-        actions = []
-        actions.append(parser.OFPActionOutput(dst_port))
+        ofproto = datapath.ofproto
+        match_action_dic = {}
+        switch_tunnel_type = self.get_switch_tunnel_type(path, transit_info)
+        ipv6_src = flow_info[1]
+        ipv6_dst = flow_info[2]
+        
+        for transit_tech in transit_info[datapath.id]:
+            actions_1 = []
+            actions_2 = []
+            actions_3 = []
+            actions_4 = []
+            if transit_tech == setting.NAT64_FlAG:
+                match_1 = parser.OFPMatch(in_port=src_port, eth_type=0x86DD,ipv6_dst=flow_info[2])
+                actions_1.append(parser.OFPActionSetField(eth_src=self.port_mac_dic[datapath.id][src_port]))
+                actions_1.append(parser.OFPActionSetField(eth_dst=self.port_mac_dic[datapath.id][setting.NAT64_6_PORT_NO]))
+                actions_1.append(parser.OFPActionDecNwTtl())
+                actions_1.append(parser.OFPActionOutput(setting.NAT64_6_PORT_NO))
+                match_action_dic.setdefault(match_1, actions_1)
+                match_2 = parser.OFPMatch(in_port=setting.NAT64_4_PORT_NO, eth_type=0x0800,ipv4_src="192.0.2.129")
+                actions_2.append(parser.OFPActionSetField(eth_src=self.port_mac_dic[datapath.id][setting.NAT64_4_PORT_NO]))
+                actions_2.append(parser.OFPActionSetField(eth_dst="ff:ff:ff:ff:ff:ff"))
+                actions_2.append(parser.OFPActionSetField(ipv4_src="10.0.1.2"))
+                actions_2.append(parser.OFPActionDecNwTtl())
+                actions_2.append(parser.OFPActionOutput(dst_port))
+                match_action_dic.setdefault(match_2, actions_2)
+                match_3 = parser.OFPMatch(in_port=dst_port, eth_type=0x0800,ipv4_dst="10.0.1.2")
+                actions_3.append(parser.OFPActionSetField(eth_src=self.port_mac_dic[datapath.id][dst_port]))
+                actions_3.append(parser.OFPActionSetField(eth_dst=self.port_mac_dic[datapath.id][setting.NAT64_4_PORT_NO]))
+                actions_3.append(parser.OFPActionSetField(ipv4_dst="192.0.2.129"))
+                actions_3.append(parser.OFPActionSetField(ip_dscp=4))
+                actions_3.append(parser.OFPActionSetField(ip_ecn=2))
+                actions_3.append(parser.OFPActionDecNwTtl())
+                actions_3.append(parser.OFPActionOutput(setting.NAT64_4_PORT_NO))
+                match_action_dic.setdefault(match_3, actions_3)
+                match_4 = parser.OFPMatch(in_port=setting.NAT64_6_PORT_NO, eth_type=0x86DD, ipv6_src=('64:ff9b::', 'ffff:ffff:ffff:ffff:ffff:ffff::'))
+                actions_4.append(parser.OFPActionSetField(eth_src=self.port_mac_dic[datapath.id][setting.NAT64_4_PORT_NO]))
+                actions_4.append(parser.OFPActionSetField(eth_dst="33:33:00:00:00:01"))
+                actions_4.append(parser.OFPActionDecNwTtl())
+                actions_4.append(parser.OFPActionOutput(src_port))
+                match_action_dic.setdefault(match_4, actions_4)
+            if transit_tech == setting.V6OV4_FLAG:
+                if switch_tunnel_type[datapath.id] == 'ce':
+                    nw_src_port = src_port
+                    nw_dst_port = dst_port
+                    nw_ipv6_src = ipv6_dst
+                    nw_ipv6_dst = ipv6_src
+                if switch_tunnel_type[datapath.id] == 'br':
+                    nw_src_port = dst_port
+                    nw_dst_port = src_port
+                    nw_ipv6_src = ipv6_src
+                    nw_ipv6_dst = ipv6_dst
+                match_1 = parser.OFPMatch(in_port=nw_src_port, eth_type=0x86DD)
+                actions_1.append(parser.OFPActionSetField(eth_src=self.port_mac_dic[datapath.id][nw_src_port]))
+                actions_1.append(parser.OFPActionSetField(eth_dst=self.port_mac_dic[datapath.id][setting.V6OV4_6_PORT_NO]))
+                actions_1.append(parser.OFPActionDecNwTtl())
+                actions_1.append(parser.OFPActionOutput(setting.V6OV4_6_PORT_NO))
+                match_action_dic.setdefault(match_1, actions_1)
+                match_2 = parser.OFPMatch(in_port=setting.V6OV4_4_PORT_NO, eth_type=0x0800)
+                actions_2.append(parser.OFPActionSetField(ipv4_src="10.7.7.7"))
+                actions_2.append(parser.OFPActionSetField(ipv4_dst="10.8.8.8"))
+                actions_2.append(parser.OFPActionDecNwTtl())
+                actions_2.append(parser.OFPActionOutput(nw_dst_port))
+                match_action_dic.setdefault(match_2, actions_2)
+                match_3 = parser.OFPMatch(in_port=nw_dst_port, eth_type=0x0800)
+                actions_3.append(parser.OFPActionSetField(eth_dst=self.port_mac_dic[datapath.id][setting.V6OV4_4_PORT_NO]))
+                actions_3.append(parser.OFPActionSetField(ipv4_src="192.0.2.2"))
+                actions_3.append(parser.OFPActionSetField(ipv4_dst="192.0.2.1"))
+                actions_3.append(parser.OFPActionDecNwTtl())
+                actions_3.append(parser.OFPActionOutput(setting.V6OV4_4_PORT_NO))
+                match_action_dic.setdefault(match_3, actions_3)
+                match_4 = parser.OFPMatch(in_port=setting.V6OV4_6_PORT_NO, eth_type=0x86DD, ipv6_src=nw_ipv6_src, ipv6_dst=nw_ipv6_dst)
+                actions_4.append(parser.OFPActionSetField(eth_src=self.port_mac_dic[datapath.id][nw_src_port]))
+                actions_4.append(parser.OFPActionSetField(eth_dst="33:33:00:00:00:01"))
+                actions_4.append(parser.OFPActionDecNwTtl())
+                actions_4.append(parser.OFPActionOutput(nw_src_port))
+                match_action_dic.setdefault(match_4, actions_4)
+            if transit_tech == setting.V4OV6_FLAG:
+                if switch_tunnel_type[datapath.id] == 'ce':
+                    nw_src_port = src_port
+                    nw_dst_port = dst_port
+                if switch_tunnel_type[datapath.id] == 'br':
+                    nw_src_port = dst_port
+                    nw_dst_port = src_port
+                match_1 = parser.OFPMatch(in_port=nw_src_port, eth_type=0x0800)
+                actions_1.append(parser.OFPActionSetField(eth_dst=self.port_mac_dic[datapath.id][setting.V4OV6_4_PORT_NO]))
+                actions_1.append(parser.OFPActionOutput(setting.V4OV6_4_PORT_NO))
+                match_action_dic.setdefault(match_1, actions_1)
+                match_2 = parser.OFPMatch(in_port=setting.V4OV6_6_PORT_NO, eth_type=0x86DD)
+                actions_2.append(parser.OFPActionOutput(nw_dst_port))
+                match_action_dic.setdefault(match_2, actions_2)
+                match_3 = parser.OFPMatch(in_port=nw_dst_port, eth_type=0x86DD)
+                actions_3.append(parser.OFPActionSetField(eth_dst=self.port_mac_dic[datapath.id][setting.V4OV6_6_PORT_NO]))
+                actions_3.append(parser.OFPActionOutput(setting.V4OV6_6_PORT_NO))
+                match_action_dic.setdefault(match_3, actions_3)
+                match_4 = parser.OFPMatch(in_port=setting.V4OV6_4_PORT_NO, eth_type=0x0800)
+                actions_4.append(parser.OFPActionOutput(nw_src_port))
 
-        if flow_info[0] == 0x0800:
-            match = parser.OFPMatch(
-                in_port=src_port, eth_type=flow_info[0],
-                ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
-        if flow_info[0] == 0x86DD:
-            match = parser.OFPMatch(
-                in_port=src_port, eth_type=flow_info[0],
-                ipv6_src=flow_info[1], ipv6_dst=flow_info[2])
+        for match in match_action_dic:
+            self.add_flow(datapath, 1, match, match_action_dic[match],
+                      idle_timeout=600, hard_timeout=1200)
+        if setting.V6OV4_FLAG in transit_info[datapath.id]:
+            if switch_tunnel_type[datapath.id] == 'ce':
+                nw_src_port = src_port
+                nw_dst_port = dst_port
+            if switch_tunnel_type[datapath.id] == 'br':
+                nw_src_port = dst_port
+                nw_dst_port = src_port
+        #     # nw_match_1 = parser.OFPMatch(in_port=setting.V6OV4_6_PORT_NO, eth_type=0x86DD, ip_proto=58, icmpv6_type=135)
+        #     # nw_actions_1 = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+        #     # self.add_flow(datapath, 5, nw_match_1, nw_actions_1,
+        #     #           idle_timeout=600, hard_timeout=1200)
+            nw_match_2 = parser.OFPMatch(in_port=nw_src_port, eth_type=0x86DD, ip_proto=58, icmpv6_type=135)
+            nw_actions_2 = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+            self.add_flow(datapath, 5, nw_match_2, nw_actions_2,
+                      idle_timeout=600, hard_timeout=1200)
 
-        self.add_flow(datapath, 1, match, actions,
-                      idle_timeout=60, hard_timeout=120)
+    def get_switch_tunnel_type(self, path, transit_info):
+        ce_flag = 0
+        br_flag = 0
+        switch_tunnel_type_dic = {}
+        for dpid in path:
+            for transit_type in transit_info[dpid]:
+                if transit_type == setting.V6OV4_FLAG or transit_type == setting.V4OV6_FLAG:
+                    if ce_flag == 0 and br_flag == 0:
+                        switch_tunnel_type_dic.setdefault(dpid,'ce')
+                        ce_flag = 1
+                    elif ce_flag == 1 and br_flag == 0:
+                        switch_tunnel_type_dic.setdefault(dpid,'br')
+                        br_flag = 1
+                    else:
+                        switch_tunnel_type_dic.setdefault(dpid,'ce')
+                        br_flag = 0
+        return switch_tunnel_type_dic
 
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         """
@@ -172,12 +318,19 @@ class ShortestForwarding(app_manager.RyuApp):
             Get access port if dst host.
             access_table: {(sw,port) :(ip, mac)}
         """
+        if ip_address(dst_ip) in ip_network("64:ff9b::/96"):
+            return 1
+        
         if access_table:
             if isinstance(list(access_table.values())[0], tuple):
                 for key in access_table.keys():
                     if dst_ip == access_table[key][0]:
                         dst_port = key[1]
                         return dst_port
+        for dpid in setting.Network_dic:
+            for port in setting.Network_dic[dpid]:
+                if ip_address(dst_ip) in ip_network(setting.Network_dic[dpid][port]):
+                    return port
         return None
 
     def get_port_pair_from_link(self, link_to_port, src_dpid, dst_dpid):
@@ -267,7 +420,6 @@ class ShortestForwarding(app_manager.RyuApp):
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
         result = self.awareness.get_ipv6_host_location(dst_ip)
         if result:  # host record in access table.
             datapath_dst, out_port = result[0], result[1]
@@ -325,7 +477,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 paths = result[1]
                 best_path = paths.get(src).get(dst)
                 return best_path
-
+    
     def get_sw(self, dpid, in_port, src, dst):
         """
             Get pair of source and destination switches.
@@ -339,7 +491,7 @@ class ShortestForwarding(app_manager.RyuApp):
         if ip_address(src).version == 6 and not ip_address(src).is_link_local:
             src_location = self.awareness.get_ipv6_host_location(src)
         if in_port in self.awareness.access_ports[dpid]:
-            if (dpid, in_port) == src_location:
+            if [dpid, in_port] == src_location or (dpid, in_port) == src_location:
                 src_sw = src_location[0]
             else:
                 return None
@@ -349,7 +501,10 @@ class ShortestForwarding(app_manager.RyuApp):
             dst_location = self.awareness.get_ipv6_host_location(dst)
         if dst_location:
             dst_sw = dst_location[0]
-
+        else:
+            if ip_address(dst) in ip_network("64:ff9b::/96"):
+                dst_sw = 1016511457371
+        
         return src_sw, dst_sw
 
     def install_flow(self, datapaths, link_to_port, access_table, path,
@@ -367,8 +522,6 @@ class ShortestForwarding(app_manager.RyuApp):
         out_port = first_dp.ofproto.OFPP_LOCAL
         back_info = (flow_info[0], flow_info[2], flow_info[1])
 
-        
-
         # inter_link
         if len(path) > 2:
             for i in range(1, len(path)-1):
@@ -378,11 +531,12 @@ class ShortestForwarding(app_manager.RyuApp):
                                                          path[i], path[i+1])
                 if port and port_next:
                     src_port, dst_port = port[1], port_next[0]
-                    # if path[i] in transit_info:
-                    #     pass
                     datapath = datapaths[path[i]]
-                    self.send_flow_mod(datapath, flow_info, src_port, dst_port)
-                    self.send_flow_mod(datapath, back_info, dst_port, src_port)
+                    if transit_info[path[i]]:
+                        self.send_transit_flow_mod(datapath, path, flow_info, transit_info, src_port, dst_port)
+                    else:
+                        self.send_flow_mod(datapath, flow_info, src_port, dst_port)
+                        self.send_flow_mod(datapath, back_info, dst_port, src_port)
                     self.logger.debug("inter_link flow install")
         if len(path) > 1:
             # the last flow entry: tor -> host
@@ -399,8 +553,11 @@ class ShortestForwarding(app_manager.RyuApp):
                 return
 
             last_dp = datapaths[path[-1]]
-            self.send_flow_mod(last_dp, flow_info, src_port, dst_port)
-            self.send_flow_mod(last_dp, back_info, dst_port, src_port)
+            if transit_info[path[-1]]:
+                self.send_transit_flow_mod(last_dp, path, flow_info, transit_info, src_port, dst_port)
+            else:
+                self.send_flow_mod(last_dp, flow_info, src_port, dst_port)
+                self.send_flow_mod(last_dp, back_info, dst_port, src_port)
 
             # the first flow entry
             port_pair = self.get_port_pair_from_link(link_to_port,
@@ -409,8 +566,11 @@ class ShortestForwarding(app_manager.RyuApp):
                 self.logger.info("Port not found in first hop.")
                 return
             out_port = port_pair[0]
-            self.send_flow_mod(first_dp, flow_info, in_port, out_port)
-            self.send_flow_mod(first_dp, back_info, out_port, in_port)
+            if transit_info[path[0]]:
+                self.send_transit_flow_mod(first_dp, path, flow_info, transit_info, in_port, out_port)
+            else:
+                self.send_flow_mod(first_dp, flow_info, in_port, out_port)
+                self.send_flow_mod(first_dp, back_info, out_port, in_port)
             self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
 
         # src and dst on the same datapath
@@ -419,9 +579,22 @@ class ShortestForwarding(app_manager.RyuApp):
             if out_port is None:
                 self.logger.info("Out_port is None in same dp")
                 return
-            self.send_flow_mod(first_dp, flow_info, in_port, out_port)
-            self.send_flow_mod(first_dp, back_info, out_port, in_port)
+            if path[0] in transit_info:
+                self.send_transit_flow_mod(last_dp, path, flow_info, transit_info, in_port, out_port)
+            else: 
+                pass
+                #self.send_flow_mod(first_dp, flow_info, in_port, out_port)
+                #self.send_flow_mod(first_dp, back_info, out_port, in_port)
             self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
+
+    def change_index(self, path):
+        index_changed_path = copy.deepcopy(path)
+        for i in range(len(path)):
+            if path[i] == 830366948081:
+                index_changed_path[i] = 1
+            if path[i] == 1016511457371:
+                index_changed_path[i] = 2
+        return index_changed_path
 
     def get_transit_info(self, path, ip_src, ip_dst):
         """
@@ -431,19 +604,20 @@ class ShortestForwarding(app_manager.RyuApp):
         path_node_tran_dic = {}
         tran_list = []
         tr_flag = 0
+        nw_path = self.change_index(path)
         if ip_address(ip_src).version == 6 and ip_address(ip_src).version == 6:
             if ip_address(ip_dst) in ip_network("64:ff9b::/96"):
                 for i in range(len(path)-1):
                     path_node_tran_dic.setdefault(path[i],[])
                     path_node_tran_dic.setdefault(path[i+1],[])
-                    if link_type_mx[path[i]-1][path[i+1]-1] == 6 and tr_flag == 0:
+                    if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 6 and tr_flag == 0:
                         pass
-                    if link_type_mx[path[i]-1][path[i+1]-1] == 4 and tr_flag == 0: 
+                    if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 4 and tr_flag == 0: 
                         tran_list.append(setting.NAT64_FlAG)
                         for j in tran_list:
                             path_node_tran_dic[path[i]].append(j)
                         tr_flag = 1
-                    if link_type_mx[path[i]-1][path[i+1]-1] == 6 and tr_flag == 1:
+                    if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 6 and tr_flag == 1:
                         tran_list.append(setting.V4OV6_FLAG)
                         for j in tran_list:
                             path_node_tran_dic[path[i]].append(j)
@@ -454,16 +628,16 @@ class ShortestForwarding(app_manager.RyuApp):
                         else:
                             for j in tran_list:
                                 path_node_tran_dic[path[i+1]].append(j)
-                    if link_type_mx[path[i]-1][path[i+1]-1] == 4 and tr_flag == 1:
+                    if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 4 and tr_flag == 1:
                         pass
                     tran_list = []
             else:
                 for i in range(len(path)-1):
                     path_node_tran_dic.setdefault(path[i],[])
                     path_node_tran_dic.setdefault(path[i+1],[])
-                    if link_type_mx[path[i]-1][path[i+1]-1] == 6:
+                    if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 6:
                         pass
-                    if link_type_mx[path[i]-1][path[i+1]-1] == 4:
+                    if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 4:
                         tran_list.append(setting.V6OV4_FLAG)
                         for j in tran_list:
                             path_node_tran_dic[path[i]].append(j)
@@ -479,9 +653,9 @@ class ShortestForwarding(app_manager.RyuApp):
             for i in range(len(path)-1):
                 path_node_tran_dic.setdefault(path[i],[])
                 path_node_tran_dic.setdefault(path[i+1],[])
-                if link_type_mx[path[i]-1][path[i+1]-1] == 4:
+                if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 4:
                     pass
-                if link_type_mx[path[i]-1][path[i+1]-1] == 6:
+                if link_type_mx[nw_path[i]-1][nw_path[i+1]-1] == 6:
                     tran_list.append(setting.V4OV6_FLAG)
                     for j in tran_list:
                         path_node_tran_dic[path[i]].append(j)
@@ -503,15 +677,19 @@ class ShortestForwarding(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
-        
-
+        print("-----------------------short")
+        print(ip_dst)
         result = self.get_sw(datapath.id, in_port, ip_src, ip_dst)
+        print(result)
         if result:
             src_sw, dst_sw = result[0], result[1]
             if dst_sw:
                 # Path has already calculated, just get it.
                 path = self.get_path(datapath, in_port, src_sw, dst_sw, weight=self.weight)
                 if path is not None:
+                    print(datapath.id)
+                    print(in_port)
+                    print(result)
                     self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
                     transit_info = self.get_transit_info(path, ip_src, ip_dst)
                     flow_info = (eth_type, ip_src, ip_dst, in_port)
@@ -522,14 +700,25 @@ class ShortestForwarding(app_manager.RyuApp):
                                         self.awareness.access_table, path,
                                         flow_info, transit_info, msg.buffer_id, msg.data)
                     if ip_address(ip_src).version == 6: 
-                        print("!!!!!!!!!!!!!!!!!!!")
-                        print(self.awareness.ipv6_access_table)
                         self.install_flow(self.datapaths,
                                         self.awareness.link_to_port,
                                         self.awareness.ipv6_access_table, path,
                                         flow_info, transit_info, msg.buffer_id, msg.data)
                 
         return
+
+    def generate_ra_pkt(self, datapath, in_port):
+        nd_option_sla = icmpv6.nd_option_sla(hw_src=self.port_mac_dic[datapath.id][in_port])
+        nd_option_pi = icmpv6.nd_option_pi(
+            pl=64, res1=6, val_l=2592000, pre_l=604800,
+            prefix=setting.Prefix_dic[datapath.id][in_port])
+        ra_data = icmpv6.nd_router_advert(ch_l=64, res=0, rou_l=1800, rea_t=0, ret_t=0,
+                                        options=[nd_option_sla, nd_option_pi])
+        ra_pkt = packet.Packet()
+        ra_pkt.add_protocol(ethernet.ethernet(ethertype=0x86DD, dst='33:33:00:00:00:01', src=self.port_mac_dic[datapath.id][in_port]))
+        ra_pkt.add_protocol(ipv6.ipv6(dst='ff02::1', src=setting.Port_link_dic[datapath.id][in_port], nxt=58))
+        ra_pkt.add_protocol(icmpv6.icmpv6(type_=134, code=0, data=ra_data))
+        return ra_pkt
 
     @set_ev_cls(ofp_event.EventOFPPortDescStatsReply, MAIN_DISPATCHER)
     def port_desc_stats_reply_handler(self, ev):
@@ -563,13 +752,36 @@ class ShortestForwarding(app_manager.RyuApp):
         ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
         ipv6_pkt = pkt.get_protocol(ipv6.ipv6)
         icmpv6_pkt = pkt.get_protocol(icmpv6.icmpv6)
+        parser = datapath.ofproto_parser
+        ofproto = datapath.ofproto
+        no_thing = 0
+
+        # print("!!!!!!!!!!!!!!!!!!!!!!!!")
+        # print(self.port_mac_dic)
+        # print(self.awareness.ipv6_access_table)
 
         if isinstance(arp_pkt, arp.arp):
             self.logger.debug("ARP processing")
-            self.arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip)
-
-        
-
+            if 6 <= in_port <= 11:
+                eth_src = '02'
+                for i in range(0, 5):
+                    r = random.randint(0, 255)
+                    s = ':' + ('00' + hex(r)[2:])[-2:]
+                    eth_src += s
+                match = parser.OFPMatch(in_port=in_port, eth_type=0x806, arp_op=1)
+                actions =  [parser.OFPActionSetField(eth_src=eth_src),
+                            parser.OFPActionSetField(eth_dst=pkt[0].src),
+                            parser.OFPActionSetField(arp_op=2),
+                            parser.OFPActionSetField(arp_spa=pkt[1].dst_ip),
+                            parser.OFPActionSetField(arp_tpa=pkt[1].src_ip),
+                            parser.OFPActionSetField(arp_sha=eth_src),
+                            parser.OFPActionSetField(arp_tha=pkt[1].src_mac),
+                            parser.OFPActionOutput(port=ofproto.OFPP_IN_PORT)]
+                self.add_flow(datapath, 1, match, actions,
+                      idle_timeout=600, hard_timeout=1200)
+            else:    
+                self.arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip)
+       
         if isinstance(ipv4_pkt, ipv4.ipv4):
             self.logger.debug("IPV4 processing")
             if len(pkt.get_protocols(ethernet.ethernet)):
@@ -580,9 +792,44 @@ class ShortestForwarding(app_manager.RyuApp):
             self.logger.debug("IPV6 processing")
             if len(pkt.get_protocols(ethernet.ethernet)):
                 if len(pkt) == 3 and 133 <= pkt[2].type_ <= 137:
-                    self.logger.debug("ICMPv6ND processing")
-                    self.icmpv6nd_forwarding(msg, pkt[1].src, pkt[1].dst)
+                    self.logger.debug("ICMPv6 processing")
+                    if pkt[2].type_ == 133:
+                        ra_pkt = self.generate_ra_pkt(datapath, in_port)
+                        ra_pkt.serialize()
+                        data = ra_pkt.data
+                        actions = [parser.OFPActionOutput(port=in_port)]
+                        out = parser.OFPPacketOut(datapath=datapath,
+                                                    buffer_id=ofproto.OFP_NO_BUFFER,
+                                                    in_port=ofproto.OFPP_CONTROLLER,
+                                                    actions=actions,
+                                                    data=data)
+                        datapath.send_msg(out)
+                    
+                    #if ip_address(pkt[2].data.dst) in ip_network("64:ff9b::/96"):
+                    if pkt[2].type_ == 135:
+                        eth_src = self.port_mac_dic[datapath.id][in_port]
+                        #eth_src = "50:af:73:24:48:b1" 
+                        nd_data_recv = pkt[2].data
+                        assert isinstance(nd_data_recv, icmpv6.nd_neighbor)
+                        target_addr = nd_data_recv.dst
+                        nd_option_tla = icmpv6.nd_option_tla(hw_src=eth_src)
+                        na_data = icmpv6.nd_neighbor(res=6, dst=target_addr, option=nd_option_tla)
+                        na_pkt = packet.Packet()
+                        na_pkt.add_protocol(ethernet.ethernet(ethertype=0x86DD, dst=pkt[0].src, src=eth_src))
+                        na_pkt.add_protocol(ipv6.ipv6(dst=pkt[1].src, src=setting.Port_link_dic[datapath.id][in_port], nxt=58))
+                        na_pkt.add_protocol(icmpv6.icmpv6(type_=136, code=0, data=na_data))
+                        na_pkt.serialize()
+                        data = na_pkt.data
+                        actions = [parser.OFPActionOutput(port=in_port)]
+                        out = parser.OFPPacketOut(datapath=datapath,
+                                                    buffer_id=ofproto.OFP_NO_BUFFER,
+                                                    in_port=ofproto.OFPP_CONTROLLER,
+                                                    actions=actions,
+                                                    data=data)
+                        datapath.send_msg(out)    
+                        #self.icmpv6nd_forwarding(msg, pkt[1].src, pkt[1].dst)
                     
                 else:
-                    eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
-                    self.shortest_forwarding(msg, eth_type, ipv6_pkt.src, ipv6_pkt.dst)
+                    if ip_address(ipv6_pkt.dst) != ip_address('2001:da8:202:10::36'):
+                        eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
+                        self.shortest_forwarding(msg, eth_type, ipv6_pkt.src, ipv6_pkt.dst)

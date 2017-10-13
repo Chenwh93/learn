@@ -2,7 +2,7 @@ import logging
 import struct
 import copy
 import networkx as nx
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from operator import attrgetter
 from ryu import cfg
 from ryu.base import app_manager
@@ -112,9 +112,13 @@ class NetworkAwareness(app_manager.RyuApp):
         """
             Get host location info:(datapath, port) according to host ip.
         """
-        for key in self.ipv6_access_table.keys():
-            if self.ipv6_access_table[key][0] == host_ip:
-                return key
+        result = []
+        for dpid in setting.Network_dic:
+            for port in setting.Network_dic[dpid]:
+                if ip_address(host_ip) in ip_network(setting.Network_dic[dpid][port]):
+                    result.append(dpid)
+                    result.append(port)
+                    return result 
         self.logger.info("%s ipv6 location is not found." % host_ip)
         return None
 

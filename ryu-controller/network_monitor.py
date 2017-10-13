@@ -368,7 +368,7 @@ class NetworkMonitor(app_manager.RyuApp):
                            key=lambda flow: (flow.match.get('in_port'),
                                              flow.match.get('ipv4_dst'))):
             key = (stat.match['in_port'],  stat.match.get('ipv4_dst'),
-                   stat.instructions[0].actions[0].port)
+                   stat.instructions[0].actions[-1].port)
             value = (stat.packet_count, stat.byte_count,
                      stat.duration_sec, stat.duration_nsec)
             self._save_stats(self.flow_stats[dpid], key, value, 5)
